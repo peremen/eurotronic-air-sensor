@@ -1,0 +1,28 @@
+; Free-running 2-bit oversampler for an I2C bus.
+; IN base pin = SDA, base+1 = SCL (pins must be consecutive, SDA the lower one).
+; Every PIO clock one sample (bit0 = SDA, bit1 = SCL) is shifted in; the FIFO is
+; autopushed every 16 samples. Oldest sample ends up in the least significant bits.
+; The state machine never drives the pins (all pindirs = input).
+
+.program i2c_sampler
+.wrap_target
+    in pins, 2
+.wrap
+
+% c-sdk {
+static inline void i2c_sampler_program_init(PIO pio, uint sm, uint offset, uint pin_sda,
+                                            uint16_t div_int, uint8_t div_frac) {
+    pio_sm_config c = i2c_sampler_program_get_default_config(offset);
+    sm_config_set_in_pins(&c, pin_sda);
+    sm_config_set_in_shift(&c, true, true, 32);      // shift right, autopush at 32 bits
+    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_RX);   // 8-word RX FIFO
+    sm_config_set_clkdiv_int_frac(&c, div_int, div_frac);
+
+    for (uint p = pin_sda; p < pin_sda + 2; p++) {
+        pio_gpio_init(pio, p);
+        gpio_disable_pulls(p);                       // the board already has pull-ups
+    }
+    pio_sm_set_consecutive_pindirs(pio, sm, pin_sda, 2, false);
+    pio_sm_init(pio, sm, offset, &c);
+}
+%}
