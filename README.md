@@ -1,6 +1,6 @@
-# Eutronic Air Quality Sensor
+# Eurotronic Air Quality Sensor
 
-I got frustrated on the buzzer of Eurtonic Luftgütesensor which I bought quite long ago.
+I got frustrated on the buzzer of Eurotronic Luftgütesensor which I bought quite long ago.
 Later revision of the hardware has the functionality to turn off the buzzer, but my version has no functionality to turn off the buzzer.
 As a result, I opened up the device and replaced the CO2 sensor to NLIR-based Technoline WL 1030, and kept this as a secondary sensor.
 Current work in progress is reverse engineering hardware details and how to integrate it in the Home Assistant.
