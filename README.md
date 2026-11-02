@@ -55,7 +55,7 @@ Connect SCK, SDA, GND to the logic analyzer. Although SGP30 and SHTC3 has differ
 On the stock firmware, the following I2C transaction is conducted for each second.
 
 | Address | Chipset | R/W | Payload | Description |
-|-------------------------------------------------|
+|---------|---------|-----|---------|-------------|
 | `0x70`  | SHTC3   | W   | `35 17` | Wakeup |
 | `0x70`  | SHTC3   | W   | `5C 24` | Get measurement |
 | `0x70`  | SHTC3   | R   | `64 2A 0A 68 D9 6F` | Humidity 2b, CRC 1b, Temperature 2b, CRC 1b |
