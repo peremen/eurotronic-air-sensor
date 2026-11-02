@@ -75,8 +75,19 @@ Claude provided following two strategies to integrate it into the Home Assistant
 
 ## I2C Sniffer with Raspberry Pi Pico W
 
-Does not touch STM8's behavior, requires soldering on only 3 pads.
+The application under `i2c_sniffer` folder implements a passive I2C sniffer running on a Raspberry Pi Pico W.
+It does not touch STM8's behavior, requires soldering on only 3 pads.
 PIO engine is used to sniff the I2C connumication, keep the STM8 as I2C master and RPi Pico only listens on it.
+Requires a Raspberry Pi Pico SDK installed, and the environment variable `PICO_SDK_PATH` needs to be set for building.
+Follow the usual CMake build routine to build the `i2c_sniffer.uf2` file and install on the Raspberry Pi Pico W.
+
+| Sensor Pad | Pico Pin |
+|------------|----------|
+| SCK        | GP5      |
+| SDA        | GP4      |
+| GND        | Any GND  |
+
+In the next iteration, an optional sensor logging to SD will be implemented.
 
 ## STM8 Replacement through Raspberry Pi Pico W
 
