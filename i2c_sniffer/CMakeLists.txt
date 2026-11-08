@@ -1,19 +1,27 @@
-cmake_minimum_required(VERSION 3.13)
-
-# copy pico_sdk_import.cmake from $PICO_SDK_PATH/external/ next to this file first
+cmake_minimum_required(VERSION 3.18)
 include(pico_sdk_import.cmake)
-
-project(i2c_sniffer C CXX ASM)
+project(aq_sniff_logger C CXX ASM)
 set(CMAKE_C_STANDARD 11)
 pico_sdk_init()
 
-add_executable(i2c_sniffer main.c decoder.c interp.c)
-pico_generate_pio_header(i2c_sniffer ${CMAKE_CURRENT_LIST_DIR}/i2c_sampler.pio)
+# SD/FatFs library: -DFATFS_SD_PATH=/path/to/no-OS-FatFS-SD-SDIO-SPI-RPi-Pico for an offline copy,
+# otherwise it is downloaded (pinned to a tested commit).
+if(FATFS_SD_PATH)
+    add_subdirectory(${FATFS_SD_PATH}/src fatfs_build)
+else()
+    include(FetchContent)
+    FetchContent_Declare(fatfs_sd
+        GIT_REPOSITORY https://github.com/carlk3/no-OS-FatFS-SD-SDIO-SPI-RPi-Pico.git
+        GIT_TAG        d5e453404cdbfaa55ab30d285b6ab0b730e84a05
+        SOURCE_SUBDIR  src)
+    FetchContent_MakeAvailable(fatfs_sd)
+endif()
 
-target_link_libraries(i2c_sniffer pico_stdlib hardware_pio hardware_dma hardware_irq hardware_clocks)
-
-# optional tuning, e.g. target_compile_definitions(i2c_sniffer PRIVATE SAMPLE_RATE_HZ=4000000 PIN_SDA=6)
-
-pico_enable_stdio_usb(i2c_sniffer 1)
-pico_enable_stdio_uart(i2c_sniffer 0)
-pico_add_extra_outputs(i2c_sniffer)
+add_executable(aq_sniff_logger main.c decoder.c interp.c cycle.c clock.c record.c sdlog.c hw_config.c logic.c)
+pico_generate_pio_header(aq_sniff_logger ${CMAKE_CURRENT_LIST_DIR}/i2c_sampler.pio)
+add_compile_definitions(USE_PRINTF)
+target_link_libraries(aq_sniff_logger pico_stdlib pico_multicore hardware_pio hardware_dma hardware_irq hardware_clocks
+                      no-OS-FatFS-SD-SDIO-SPI-RPi-Pico)
+pico_enable_stdio_usb(aq_sniff_logger 1)
+pico_enable_stdio_uart(aq_sniff_logger 0)
+pico_add_extra_outputs(aq_sniff_logger)

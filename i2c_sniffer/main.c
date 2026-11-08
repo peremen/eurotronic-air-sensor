@@ -1,57 +1,44 @@
-// Passive I2C sniffer for Raspberry Pi Pico (RP2040), C SDK.
+// Option A: passive sniffer + SD logger for the Eurotronic air quality sensor board (Raspberry Pi Pico, RP2040).
+//   core 0: PIO/DMA I2C sniffer -> decoder -> measurement cycles -> one aggregated record per interval
+//   core 1: owns the SD card (FatFs), takes records from a queue, so card trouble can never disturb the sniffer
 //
-// Wiring (through ~100 ohm series resistors, GND shared, nothing else connected):
-//     board SDA -> GP4 (PIN_SDA)      board SCL -> GP5 (PIN_SDA + 1)      board GND -> any Pico GND
-//
-// A PIO state machine oversamples both lines at SAMPLE_RATE_HZ, DMA (two chained channels, ping-pong)
-// fills a ring of buffers, and decoder.c / interp.c turn the samples into transactions and values.
-// Serial commands over USB CDC:  s = summary   r = toggle raw lines   c = clear statistics
+// Wiring: board SDA -> GP4 and board SCL -> GP5 (through ~100 ohm), board GND -> Pico GND.
+//         SD module: MISO GP0, CS GP1, SCK GP2, MOSI GP3, VCC = 5 V (VBUS), GND.
+// Serial commands (line based):  t YYYY-MM-DD HH:MM:SS  set the clock | s  status + command summary
+//                                v  toggle verbose transaction output | u  close the log file (safe to pull the card)
+//                                n  open a new log file (after u, or to force a remount)
 #include <stdio.h>
+#include <string.h>
 #include "pico/stdlib.h"
+#include "pico/multicore.h"
+#include "pico/util/queue.h"
 #include "hardware/pio.h"
 #include "hardware/dma.h"
 #include "hardware/irq.h"
 #include "hardware/clocks.h"
 #include "i2c_sampler.pio.h"
+#include "config.h"
 #include "decoder.h"
 #include "interp.h"
+#include "cycle.h"
+#include "clock.h"
+#include "sdlog.h"
 
-#ifndef PIN_SDA
-#define PIN_SDA 4                   // SCL must be PIN_SDA + 1
-#endif
-#ifndef SAMPLE_RATE_HZ
-#define SAMPLE_RATE_HZ 2000000u     // 20 samples per bit at 100 kHz
-#endif
-#ifndef BUF_WORDS
-#define BUF_WORDS 2048              // 16 samples per word -> 32768 samples (16 ms at 2 MS/s) per buffer
-#endif
-#ifndef NBUF
-#define NBUF 12                     // ring of buffers: ~98 kB RAM, ~200 ms of slack at 2 MS/s
-#endif
-#ifndef SUMMARY_PERIOD_S
-#define SUMMARY_PERIOD_S 600        // display only; 0 disables the automatic summary
-#endif
-#ifndef WAIT_FOR_USB
-#define WAIT_FOR_USB 1
-#endif
-
+// ------------------------------------------------------------------------------------------ sniffer (core 0)
 static PIO  g_pio = pio0;
 static uint g_sm;
 static uint g_dma[2];
 static uint32_t bufs[NBUF][BUF_WORDS];
-
-static volatile uint32_t produced;   // buffers completed by DMA
-static volatile uint32_t consumed;   // buffers fully decoded
-static volatile uint32_t overruns;
+static volatile uint32_t produced, consumed, overruns;
 
 static void dma_isr(void) {
-    for (;;) {                       // buffers complete strictly alternately: seq k on channel k & 1
+    for (;;) {                                   // buffers complete strictly alternately: sequence k on channel k & 1
         uint32_t k = produced;
         uint c = k & 1u;
         if (!(dma_hw->ints0 & (1u << g_dma[c]))) break;
         dma_hw->ints0 = 1u << g_dma[c];
         produced = k + 1;
-        uint32_t next = k + 2;       // this channel will write sequence k + 2 after the other one
+        uint32_t next = k + 2;
         if (next >= consumed + NBUF) overruns++;
         dma_channel_set_write_addr(g_dma[c], bufs[next % NBUF], false);
         dma_channel_set_trans_count(g_dma[c], BUF_WORDS, false);
@@ -61,13 +48,10 @@ static void dma_isr(void) {
 static void start_capture(void) {
     uint offset = pio_add_program(g_pio, &i2c_sampler_program);
     g_sm = pio_claim_unused_sm(g_pio, true);
-
     uint32_t sys = clock_get_hz(clk_sys);
-    uint32_t div_fixed = (uint32_t)(((uint64_t)sys * 256u + SAMPLE_RATE_HZ / 2) / SAMPLE_RATE_HZ);  // 16.8 fixed
+    uint32_t div_fixed = (uint32_t)(((uint64_t)sys * 256u + SAMPLE_RATE_HZ / 2) / SAMPLE_RATE_HZ);
     i2c_sampler_program_init(g_pio, g_sm, offset, PIN_SDA, (uint16_t)(div_fixed >> 8), (uint8_t)(div_fixed & 0xFF));
-    double actual_rate = (double)sys * 256.0 / div_fixed;
-    interp_init(actual_rate);
-
+    interp_init((double)sys * 256.0 / div_fixed);
     g_dma[0] = dma_claim_unused_channel(true);
     g_dma[1] = dma_claim_unused_channel(true);
     for (int i = 0; i < 2; i++) {
@@ -82,62 +66,123 @@ static void start_capture(void) {
     }
     irq_set_exclusive_handler(DMA_IRQ_0, dma_isr);
     irq_set_enabled(DMA_IRQ_0, true);
-
     dma_channel_start(g_dma[0]);
     pio_sm_set_enabled(g_pio, g_sm, true);
-    printf("sniffer running: SDA=GP%d SCL=GP%d, %.0f samples/s, %u buffers x %u samples\n",
-           PIN_SDA, PIN_SDA + 1, actual_rate, NBUF, BUF_WORDS * 16u);
+}
+
+// ------------------------------------------------------------------------------------------- SD writer (core 1)
+static queue_t rec_q;
+static volatile int sd_request;                  // 0 none, 1 close, 2 (re)open
+static volatile uint32_t sd_written;
+
+static void core1_entry(void) {
+    sdlog_open();                                // everything touching the card runs on this core
+    for (;;) {
+        int req = sd_request;
+        if (req == 1) { sdlog_close(); sd_request = 0; }
+        else if (req == 2) { sdlog_open(); sd_request = 0; }
+        sdlog_task();
+        sdlog_record_t r;
+        while (sdlog_state() == SDLOG_OK && queue_try_peek(&rec_q, &r)) {
+            if (!sdlog_write(&r)) break;         // keep the record queued, it is written after the remount
+            queue_try_remove(&rec_q, &r);
+            sd_written++;
+        }
+        sleep_ms(50);
+    }
+}
+
+// ------------------------------------------------------------------------------------------------ console
+static bool verbose;
+static uint32_t queue_dropped;
+
+static uint32_t uptime_s(void) { return to_ms_since_boot(get_absolute_time()) / 1000u; }
+
+static const char *sd_text(void) {
+    switch (sdlog_state()) { case SDLOG_OK: return "logging"; case SDLOG_ERROR: return "ERROR (retrying)"; default: return "closed"; }
+}
+
+static void print_status(void) {
+    char dt[24];
+    clock_format(uptime_s(), dt, sizeof dt);
+    printf("status: uptime %u s, clock %s, SD %s %s, records written %lu, queued %u, dropped %lu, sniffer errors %lu\n",
+           (unsigned)uptime_s(), dt[0] ? dt : "not set", sd_text(), sdlog_filename(), (unsigned long)sd_written,
+           (unsigned)queue_get_level(&rec_q), (unsigned long)queue_dropped, (unsigned long)cycle_errors());
+    interp_summary();
+}
+
+static void handle_line(char *line) {
+    if (line[0] == 't' && line[1] == ' ') {
+        if (clock_set_from_string(line + 2, uptime_s())) printf("clock set\n");
+        else printf("usage: t YYYY-MM-DD HH:MM:SS\n");
+    } else if (!strcmp(line, "s")) print_status();
+    else if (!strcmp(line, "v")) { verbose = !verbose; interp_set_raw(true); printf("verbose %s\n", verbose ? "on" : "off"); }
+    else if (!strcmp(line, "u")) { sd_request = 1; printf("closing the log file...\n"); }
+    else if (!strcmp(line, "n")) { sd_request = 2; printf("opening a new log file...\n"); }
+    else if (line[0]) printf("commands: t YYYY-MM-DD HH:MM:SS | s | v | u | n\n");
+}
+
+static void poll_console(void) {
+    static char line[48];
+    static unsigned len;
+    int c;
+    while ((c = getchar_timeout_us(0)) != PICO_ERROR_TIMEOUT) {
+        if (c == '\r' || c == '\n') { line[len] = 0; handle_line(line); len = 0; }
+        else if (len < sizeof line - 1) line[len++] = (char)c;
+    }
 }
 
 int main(void) {
     stdio_init_all();
-#if WAIT_FOR_USB
-    while (!stdio_usb_connected()) sleep_ms(100);
-    sleep_ms(200);
-#endif
+    for (int waited = 0; !stdio_usb_connected() && waited < USB_WAIT_MS; waited += 100) sleep_ms(100);
+    printf("aq_sniff_logger: SDA=GP%d SCL=GP%d, log interval %d s\n", PIN_SDA, PIN_SDA + 1, LOG_INTERVAL_S);
+
     dec_init();
+    cycle_init();
+    queue_init(&rec_q, sizeof(sdlog_record_t), RECORD_QUEUE_LEN);
+    multicore_launch_core1(core1_entry);
     start_capture();
 
     uint32_t last_overruns = 0;
+    absolute_time_t next_flush = make_timeout_time_ms(LOG_INTERVAL_S * 1000);
     absolute_time_t next_summary = make_timeout_time_ms(SUMMARY_PERIOD_S * 1000);
 
     for (;;) {
-        // 1. decode every completed buffer
-        while (consumed < produced) {
+        while (consumed < produced) {                                   // 1. decode completed sample buffers
             const uint32_t *b = bufs[consumed % NBUF];
             for (uint i = 0; i < BUF_WORDS; i++) dec_push_word(b[i]);
             consumed++;
         }
-        // 2. report finished transactions
-        txn_t t;
-        while (dec_pop(&t)) interp_handle(&t);
-
-        // 3. health checks
-        if (overruns != last_overruns) {
-            printf("!! DMA ring overrun (%lu): decoding could not keep up, timestamps after this point are unreliable\n",
-                   (unsigned long)overruns);
+        txn_t t;                                                        // 2. transactions -> measurement cycles
+        while (dec_pop(&t)) {
+            if (verbose) interp_handle(&t);
+            cycle_sample_t s;
+            if (cycle_handle(&t, &s)) agg_add(&s);
+        }
+        if (overruns != last_overruns) {                                // 3. health checks
+            printf("!! DMA ring overrun (%lu): decoding could not keep up\n", (unsigned long)overruns);
             last_overruns = overruns;
             dec_reset();
         }
         uint32_t stall_bit = 1u << (PIO_FDEBUG_RXSTALL_LSB + g_sm);
-        if (g_pio->fdebug & stall_bit) {
-            g_pio->fdebug = stall_bit;
-            printf("!! PIO RX FIFO stalled: samples were lost\n");
-        }
-        if (dec_dropped()) {
-            static uint32_t shown;
-            if (dec_dropped() != shown) { shown = dec_dropped(); printf("!! %lu transactions dropped (output too slow)\n", (unsigned long)shown); }
-        }
+        if (g_pio->fdebug & stall_bit) { g_pio->fdebug = stall_bit; printf("!! PIO RX FIFO stalled: samples lost\n"); }
 
-        // 4. serial commands
-        int ch = getchar_timeout_us(0);
-        if (ch == 's') interp_summary();
-        else if (ch == 'r') { static bool raw = true; raw = !raw; interp_set_raw(raw); printf("raw lines %s\n", raw ? "on" : "off"); }
-        else if (ch == 'c') { interp_clear_stats(); printf("statistics cleared\n"); }
-
+        if (absolute_time_diff_us(get_absolute_time(), next_flush) <= 0) {   // 4. one record per interval
+            next_flush = delayed_by_ms(next_flush, LOG_INTERVAL_S * 1000);
+            sdlog_record_t rec;
+            if (agg_flush(&rec, uptime_s())) {
+                if (!queue_try_add(&rec_q, &rec)) queue_dropped++;
+                printf("%6u s  T %.2f C  RH %.1f %%  AH calc %.2f / sent %.1f g/m3  eCO2 %u (max %u)  TVOC %u (max %u)  cycles %u err %u  SD %s\n",
+                       (unsigned)rec.uptime_s, rec.t_c, rec.rh_pct, rec.ah_calc_gm3, rec.ah_sent_gm3, rec.eco2_last, rec.eco2_max,
+                       rec.tvoc_last, rec.tvoc_max, rec.cycles, rec.errors, sd_text());
+            } else {
+                printf("%6u s  no sensor traffic seen in this interval\n", (unsigned)uptime_s());
+            }
+        }
+        poll_console();
 #if SUMMARY_PERIOD_S > 0
         if (absolute_time_diff_us(get_absolute_time(), next_summary) <= 0) {
-            interp_summary();
+            print_status();
             next_summary = make_timeout_time_ms(SUMMARY_PERIOD_S * 1000);
         }
 #endif
