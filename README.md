@@ -73,13 +73,13 @@ The raw bytes were written in the SGP30, and it is interpreted as 100.2 g/m^3, a
 
 Claude provided following two strategies to integrate it into the Home Assistant instance.
 
-## I2C Sniffer with Raspberry Pi Pico W
+## I2C Sniffer with Raspberry Pi Pico (W)
 
-The application under `i2c_sniffer` folder implements a passive I2C sniffer running on a Raspberry Pi Pico W.
+The application under `i2c_sniffer` folder implements a passive I2C sniffer running and optional SD card logging on a Raspberry Pi Pico (W).
 It does not touch STM8's behavior, requires soldering on only 3 pads.
 PIO engine is used to sniff the I2C connumication, keep the STM8 as I2C master and RPi Pico only listens on it.
 Requires a Raspberry Pi Pico SDK installed, and the environment variable `PICO_SDK_PATH` needs to be set for building.
-Follow the usual CMake build routine to build the `i2c_sniffer.uf2` file and install on the Raspberry Pi Pico W.
+Follow the usual CMake build routine to build the `aq_sniffer_logger.uf2` file and install on the Raspberry Pi Pico (W).
 
 | Sensor Pad | Pico Pin |
 |------------|----------|
@@ -87,7 +87,44 @@ Follow the usual CMake build routine to build the `i2c_sniffer.uf2` file and ins
 | SDA        | GP4      |
 | GND        | Any GND  |
 
-In the next iteration, an optional sensor logging to SD will be implemented.
+Place a small resistor (I used 150 ohms) between the Pico's pin and the sensor's pad.
+
+Optionally, the application supports microSD card logging.
+Sensor measurements will be written for each 10 seconds.
+Grab a Catalex microSD card adapter and wire it as the following:
+
+| Adapter Pin | Pico Pin |
+|-------------|----------|
+| CS          | GP1      |
+| SCK         | GP2      |
+| MOSI        | GP3      |
+| MISO        | GP0      |
+| VCC         | VBUS     |
+| GND         | Any GND  |
+
+Please note that the application does not support exFAT, format your microSD as FAT32.
+I've tested with a 4 GB microSDHC card, as the text logging will be not big anyway.
+
+Meaning of the LED blinking:
+
+* Reading decoded: one short flash, about once per second.
+* Record written to the SD card: two quick flashes, about every 10 s.
+* SD problem (no card, failed write): three slow flashes, repeated every 1.5 s until it recovers.
+* Sniffer or bus problem (CRC error, DMA overrun, PIO stall, dropped record): five rapid flashes on each occurrence.
+* Alive but no sensor traffic: one long flash every 2 s. It starts after 5 s without a decoded reading, and it also shows during the first seconds after power-up.
+
+Patterns never cut each other off. If events coincide, the order is bus error, then SD error, then write, then data, and repeated requests of the same kind merge into one.
+By default, the Pico's onboard LED (GP25) is blinking.
+In case of Pico W, as the internal LED is controlled by the Wi-Fi chipset, you will need another dedicated LED for sensor status indicator.
+Add the line `#define STATUS_LED_PIN 16` in the `config.h` and wire the LED through a resistor to ground.
+
+Connecting the Raspberry Pi Pico (W) will expose a serial port, and it prints out the statistics and a small control interface.
+
+* `t YYYY-MM-DD HH:MM:SS`: set the clock used for logging timestamp
+* `s`: status + command summary
+* `v`: toggle verbose transaction output
+* `u`: close the log file (safe to pull the card)
+* `n`: open a new log file (after `u`, or to force a remount)
 
 ## STM8 Replacement through Raspberry Pi Pico W
 
