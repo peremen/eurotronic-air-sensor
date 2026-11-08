@@ -142,3 +142,29 @@ Connecting the Raspberry Pi Pico (W) will expose a serial port, and it prints ou
 ## STM8 Replacement through Raspberry Pi Pico W
 
 Can customize the default behavior, but requires soldering in way more test points. None of the LEDs have corresponding test point, a fine soldering skill is required.
+
+## Disclaimer
+
+The repository contains an independent hardware research and reverse engineering effort intended for educational, interoperability, and documentation purposes.
+
+The information, findings, schematics, and other materials published in this repository are provided for informational purposes only.
+They may be incomplete, inaccurate, or subject to revision as further research is conducted.
+No copy of the STM8's internal firmware is extracted, reproduced, or redistributed with this repository.
+Firmware extraction was not necessary for the scope of this investigation.
+The schematic is an independent reconstruction based on photos, physical measurements, and AI-assisted analysis.
+Any resemblance to existing proprietary schematics or documentation is unintentional.
+
+This project is not affiliated with, endorsed by, or sponsored by Eurotronic or any other vendors associated with the sensor hardware.
+All trademarks, product names, and other intellectual property referenced remain the property of their respective owners.
+
+Any hardware modifications, experimental procedures, or techniques described in this repository are undertaken entirely at the user's own risk.
+They may result in permanent hardware damage, unexpected behavior, or other unintended consequences.
+
+The author assumes no responsibility or liability for any damage, loss, or other consequences resulting from the use, misuse, or interpretation of the information provided.
+
+Findings are based on the author's own hardware and the testing conditions available during the investigation.
+They may not apply to other hardware revisions or variants.
+
+Based on observed functional differences, the existence of at least two hardware revisions is suspected.
+In particular, the earlier revision appears to lack the ability to disable the buzzer, whereas the later revision provides this functionality.
+This distinction has not necessarily been verified across all hardware variants.
