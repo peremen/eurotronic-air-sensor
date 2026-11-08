@@ -17,10 +17,15 @@ There are 5 LEDs indicating the eCO2 and VOC level, which is connected to the ST
 
 Front side of the board:
 
-![Front side of the board](/hardware/front.png =960x960)
+<picture>
+  <img alt="Front side of the board" src="/hardware/front.png" width="50%">
+</picture>
 
 Back side of the board:
-![Back side of the board](/hardware/back.png =960x960)
+
+<picture>
+  <img alt="Back side of the board" src="/hardware/back.png" width="50%">
+</picture>
 
 On the back side (where button is mounted), there are total 8 test pads divided into 4 parallel to the USB connector/4 orthogonal to it.
 
