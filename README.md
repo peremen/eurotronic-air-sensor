@@ -14,6 +14,14 @@ Current work in progress is reverse engineering hardware details and how to inte
 
 SHTC3 is 3.3 V part, while SGP30 is 1.8 V part. Both sensors communicate through I2C, and uses standard I2C address for those sensors (`0x58` for SGP30, `0x70` for SHTC3)
 There are 5 LEDs indicating the eCO2 and VOC level, which is connected to the STM8 through individual GPIO.
+
+Front side of the board:
+
+![Front side of the board](hardware/front.png =960x960)
+
+Back side of the board:
+![Back side of the board](hardware/back.png =960x960)
+
 On the back side (where button is mounted), there are total 8 test pads divided into 4 parallel to the USB connector/4 orthogonal to it.
 
 Group 1 from left to right:
