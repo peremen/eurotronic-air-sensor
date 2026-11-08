@@ -17,7 +17,7 @@ else()
     FetchContent_MakeAvailable(fatfs_sd)
 endif()
 
-add_executable(aq_sniff_logger main.c decoder.c interp.c cycle.c clock.c record.c sdlog.c hw_config.c logic.c)
+add_executable(aq_sniff_logger main.c decoder.c interp.c cycle.c clock.c record.c sdlog.c hw_config.c logic.c status_led.c)
 pico_generate_pio_header(aq_sniff_logger ${CMAKE_CURRENT_LIST_DIR}/i2c_sampler.pio)
 add_compile_definitions(USE_PRINTF)
 target_link_libraries(aq_sniff_logger pico_stdlib pico_multicore hardware_pio hardware_dma hardware_irq hardware_clocks

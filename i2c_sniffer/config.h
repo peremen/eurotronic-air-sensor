@@ -18,5 +18,6 @@
 #define SD_LOG_DIR         "LOG"
 #define SD_LOG_PREFIX      "aq_"
 #define RECORD_QUEUE_LEN   360           // records buffered in RAM while the card is missing (1 hour at 10 s)
+#define NO_DATA_TIMEOUT_S  5             // idle LED pattern when no sensor reading was decoded for this long (display only)
 #define SUMMARY_PERIOD_S   600           // automatic command summary on the serial port (display only), 0 = off
 #define USB_WAIT_MS        5000          // wait this long for a serial terminal at start, then run unattended

@@ -4,6 +4,8 @@
 //
 // Wiring: board SDA -> GP4 and board SCL -> GP5 (through ~100 ohm), board GND -> Pico GND.
 //         SD module: MISO GP0, CS GP1, SCK GP2, MOSI GP3, VCC = 5 V (VBUS), GND.
+// Status LED: 1 flash = sensor reading decoded, 2 flashes = record written to the SD card, 3 slow flashes = SD problem,
+//             5 rapid flashes = sniffer/bus problem, 1 long flash every 2 s = alive but no sensor traffic.
 // Serial commands (line based):  t YYYY-MM-DD HH:MM:SS  set the clock | s  status + command summary
 //                                v  toggle verbose transaction output | u  close the log file (safe to pull the card)
 //                                n  open a new log file (after u, or to force a remount)
@@ -23,6 +25,15 @@
 #include "cycle.h"
 #include "clock.h"
 #include "sdlog.h"
+#include "status_led.h"
+
+// Status LED: the on-board LED of the Pico (GP25). Define STATUS_LED_PIN in config.h to use an external LED instead
+// (with a series resistor). The Pico W has no GPIO LED (it sits on the wireless chip), then the LED is simply disabled.
+#ifndef STATUS_LED_PIN
+#ifdef PICO_DEFAULT_LED_PIN
+#define STATUS_LED_PIN PICO_DEFAULT_LED_PIN
+#endif
+#endif
 
 // ------------------------------------------------------------------------------------------ sniffer (core 0)
 static PIO  g_pio = pio0;
@@ -132,8 +143,21 @@ static void poll_console(void) {
     }
 }
 
+static void led_set(bool on) {
+#ifdef STATUS_LED_PIN
+    gpio_put(STATUS_LED_PIN, on);
+#else
+    (void)on;
+#endif
+}
+
 int main(void) {
     stdio_init_all();
+#ifdef STATUS_LED_PIN
+    gpio_init(STATUS_LED_PIN);
+    gpio_set_dir(STATUS_LED_PIN, GPIO_OUT);
+#endif
+    status_led_init(led_set);
     for (int waited = 0; !stdio_usb_connected() && waited < USB_WAIT_MS; waited += 100) sleep_ms(100);
     printf("aq_sniff_logger: SDA=GP%d SCL=GP%d, log interval %d s\n", PIN_SDA, PIN_SDA + 1, LOG_INTERVAL_S);
 
@@ -143,7 +167,8 @@ int main(void) {
     multicore_launch_core1(core1_entry);
     start_capture();
 
-    uint32_t last_overruns = 0;
+    uint32_t last_overruns = 0, stalls = 0, last_bus_errors = 0, last_written = 0;
+    uint32_t last_data_ms = 0, next_sd_err_ms = 0, next_idle_ms = 0;
     absolute_time_t next_flush = make_timeout_time_ms(LOG_INTERVAL_S * 1000);
     absolute_time_t next_summary = make_timeout_time_ms(SUMMARY_PERIOD_S * 1000);
 
@@ -157,7 +182,11 @@ int main(void) {
         while (dec_pop(&t)) {
             if (verbose) interp_handle(&t);
             cycle_sample_t s;
-            if (cycle_handle(&t, &s)) agg_add(&s);
+            if (cycle_handle(&t, &s)) {
+                agg_add(&s);
+                status_led_event(LED_EV_DATA);
+                last_data_ms = to_ms_since_boot(get_absolute_time());
+            }
         }
         if (overruns != last_overruns) {                                // 3. health checks
             printf("!! DMA ring overrun (%lu): decoding could not keep up\n", (unsigned long)overruns);
@@ -165,7 +194,7 @@ int main(void) {
             dec_reset();
         }
         uint32_t stall_bit = 1u << (PIO_FDEBUG_RXSTALL_LSB + g_sm);
-        if (g_pio->fdebug & stall_bit) { g_pio->fdebug = stall_bit; printf("!! PIO RX FIFO stalled: samples lost\n"); }
+        if (g_pio->fdebug & stall_bit) { g_pio->fdebug = stall_bit; stalls++; printf("!! PIO RX FIFO stalled: samples lost\n"); }
 
         if (absolute_time_diff_us(get_absolute_time(), next_flush) <= 0) {   // 4. one record per interval
             next_flush = delayed_by_ms(next_flush, LOG_INTERVAL_S * 1000);
@@ -178,6 +207,15 @@ int main(void) {
             } else {
                 printf("%6u s  no sensor traffic seen in this interval\n", (unsigned)uptime_s());
             }
+        }
+        {                                                               // 5. status LED
+            uint32_t now = to_ms_since_boot(get_absolute_time());
+            if (sd_written != last_written) { last_written = sd_written; status_led_event(LED_EV_WRITE); }
+            uint32_t bus_errors = cycle_errors() + overruns + stalls + queue_dropped + dec_dropped();
+            if (bus_errors != last_bus_errors) { last_bus_errors = bus_errors; status_led_event(LED_EV_ERR_BUS); }
+            if (sdlog_state() == SDLOG_ERROR && (int32_t)(now - next_sd_err_ms) >= 0) { status_led_event(LED_EV_ERR_SD); next_sd_err_ms = now + 1500; }
+            if (now - last_data_ms > NO_DATA_TIMEOUT_S * 1000u && (int32_t)(now - next_idle_ms) >= 0) { status_led_event(LED_EV_IDLE); next_idle_ms = now + 2000; }
+            status_led_task(now);
         }
         poll_console();
 #if SUMMARY_PERIOD_S > 0
